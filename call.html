@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Call</title>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  :root{
+    --bg:#f5f6fa; --card:#ffffff; --text:#1b1f2a; --muted:#677084;
+    --accent:#2563eb; --accent-text:#ffffff; --border:#e1e4ec; --danger:#dc2626;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0f1218; --card:#181c25; --text:#eef0f5; --muted:#98a1b3; --accent:#3b82f6; --border:#2a3040; }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .center{min-height:100%;display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:32px;width:100%;max-width:440px}
+  h1{margin:0 0 6px;font-size:1.5rem}
+  p{color:var(--muted);margin:0 0 22px;line-height:1.5}
+  label{display:block;font-size:.85rem;margin-bottom:6px;color:var(--muted)}
+  input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);
+        background:transparent;color:var(--text);font-size:1rem;margin-bottom:16px}
+  button{padding:13px;border:0;border-radius:10px;font-size:1rem;font-weight:600;cursor:pointer;
+         background:var(--accent);color:var(--accent-text)}
+  .card button{width:100%;margin-bottom:10px}
+  button.secondary{background:transparent;color:var(--text);border:1px solid var(--border)}
+  .note{font-size:.8rem;color:var(--muted);margin-top:14px}
+  .error{color:var(--danger);font-size:.9rem;margin-top:8px}
+  .hidden{display:none !important}
+
+  /* Call screen */
+  #callScreen{position:fixed;inset:0;background:#000;display:flex;flex-direction:column}
+  #remote{flex:1;width:100%;min-height:0;object-fit:cover;background:#000}
+  #local{position:absolute;right:14px;top:14px;width:120px;max-width:30vw;border-radius:12px;
+         border:2px solid rgba(255,255,255,.4);background:#222;transform:scaleX(-1);object-fit:cover}
+  #status{position:absolute;left:0;right:0;top:40%;text-align:center;color:#fff;padding:0 20px}
+  #status .small{font-size:.85rem;opacity:.8;word-break:break-all;margin-top:10px}
+  #status button{margin-top:14px}
+  #brand{position:absolute;left:14px;top:14px;color:#fff;font-weight:600;text-shadow:0 1px 4px rgba(0,0,0,.6)}
+  #controls{position:absolute;left:0;right:0;bottom:0;padding:16px;display:flex;gap:10px;
+            justify-content:center;background:linear-gradient(transparent,rgba(0,0,0,.65))}
+  #controls button{background:rgba(255,255,255,.18);color:#fff;border-radius:999px;padding:12px 18px;font-size:.95rem}
+  #controls button.off{background:#fff;color:#000}
+  #controls button.end{background:var(--danger)}
+</style>
+</head>
+<body>
+
+<!-- HOST: create a call -->
+<div id="hostView" class="center hidden">
+  <div class="card">
+    <h1 class="biz"></h1>
+    <p>Start a private video call and send the link to your client.</p>
+    <button id="createBtn">Start a call</button>
+    <div id="hostError" class="error"></div>
+    <div class="note">Keep this page open until your client joins. Your browser will ask for camera and mic access.</div>
+  </div>
+</div>
+
+<!-- CLIENT: join a call -->
+<div id="clientView" class="center hidden">
+  <div class="card">
+    <h1 class="biz"></h1>
+    <p>Your call is ready. Tap join to start with your camera and mic.</p>
+    <button id="joinBtn">Join call</button>
+    <div id="clientError" class="error"></div>
+    <div class="note">If asked, allow camera and microphone access.</div>
+  </div>
+</div>
+
+<!-- ENDED -->
+<div id="endedView" class="center hidden">
+  <div class="card">
+    <h1>Call ended</h1>
+    <p>Thanks for calling.</p>
+    <button onclick="location.href=location.pathname">Back to start</button>
+  </div>
+</div>
+
+<!-- IN CALL -->
+<div id="callScreen" class="hidden">
+  <video id="remote" autoplay playsinline></video>
+  <video id="local" autoplay playsinline muted></video>
+  <div id="brand" class="biz"></div>
+  <div id="status">
+    <div id="statusText">Connecting...</div>
+    <div class="small" id="linkText"></div>
+    <button id="copyBtn" class="hidden">Copy link</button>
+  </div>
+  <div id="controls">
+    <button id="micBtn">Mute</button>
+    <button id="camBtn">Camera off</button>
+    <button id="endBtn" class="end">End</button>
+  </div>
+</div>
+
+<script>
+  // ====== EDIT THIS ======
+  const BUSINESS_NAME = "My Business";
+  // =======================
+
+  document.title = BUSINESS_NAME + " - Call";
+  document.querySelectorAll(".biz").forEach(el => el.textContent = BUSINESS_NAME);
+
+  const $ = id => document.getElementById(id);
+  const show = id => ["hostView","clientView","endedView","callScreen"].forEach(v => $(v).classList.toggle("hidden", v !== id));
+
+  let peer = null, localStream = null, currentCall = null, ended = false;
+
+  const room = new URLSearchParams(location.search).get("room");
+  show(room ? "clientView" : "hostView");
+
+  function randomId(){
+    const chars = "abcdefghjkmnpqrstuvwxyz23456789";
+    const a = new Uint8Array(12);
+    crypto.getRandomValues(a);
+    return Array.from(a, n => chars[n % chars.length]).join("");
+  }
+  const prefix = BUSINESS_NAME.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 15);
+
+  async function getMedia(errEl){
+    try{
+      localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+      $("local").srcObject = localStream;
+      return true;
+    }catch(e){
+      errEl.textContent = "Could not access camera/mic. Please allow permission and use HTTPS (your github.io link is fine).";
+      return false;
+    }
+  }
+
+  function setStatus(text, showLink){
+    $("status").classList.remove("hidden");
+    $("statusText").textContent = text;
+    $("linkText").classList.toggle("hidden", !showLink);
+    $("copyBtn").classList.toggle("hidden", !showLink);
+  }
+
+  function setupCall(call){
+    currentCall = call;
+    call.on("stream", stream => {
+      $("remote").srcObject = stream;
+      $("status").classList.add("hidden");
+    });
+    call.on("close", () => endCall(false));
+    call.on("error", () => { setStatus("Connection problem. Try again.", false); });
+  }
+
+  function endCall(){
+    if (ended) return;
+    ended = true;
+    try{ currentCall && currentCall.close(); }catch{}
+    try{ peer && peer.destroy(); }catch{}
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
+    show("endedView");
+  }
+
+  /* ---------- HOST ---------- */
+  async function startHost(){
+    $("hostError").textContent = "";
+    if (!(await getMedia($("hostError")))) return;
+
+    const id = (prefix ? prefix + "-" : "") + randomId();
+    peer = new Peer(id);
+
+    peer.on("open", () => {
+      const link = location.origin + location.pathname + "?room=" + encodeURIComponent(id);
+      $("linkText").textContent = link;
+      $("copyBtn").onclick = async e => {
+        try{ await navigator.clipboard.writeText(link); e.target.textContent = "Copied!"; }
+        catch{ e.target.textContent = "Select the link and copy it"; }
+        setTimeout(() => e.target.textContent = "Copy link", 2000);
+      };
+      show("callScreen");
+      setStatus("Waiting for your client to join. Send them this link:", true);
+    });
+
+    peer.on("call", call => {
+      call.answer(localStream);
+      setupCall(call);
+    });
+
+    peer.on("error", err => {
+      if (err.type === "unavailable-id") { peer.destroy(); startHost(); return; }
+      setStatus("Connection error (" + err.type + "). Refresh and try again.", false);
+    });
+  }
+
+  /* ---------- CLIENT ---------- */
+  async function joinCall(){
+    $("clientError").textContent = "";
+    if (!(await getMedia($("clientError")))) return;
+
+    peer = new Peer();
+    peer.on("open", () => {
+      show("callScreen");
+      setStatus("Connecting...", false);
+      setupCall(peer.call(room, localStream));
+      setTimeout(() => {
+        if (!$("remote").srcObject && !ended) setStatus("Still waiting. Make sure the host has their page open.", false);
+      }, 15000);
+    });
+    peer.on("error", err => {
+      if (err.type === "peer-unavailable") setStatus("The host is not online yet. Ask them to open the call page, then refresh.", false);
+      else setStatus("Connection error (" + err.type + "). Refresh and try again.", false);
+    });
+  }
+
+  /* ---------- Controls ---------- */
+  $("micBtn").onclick = e => {
+    const t = localStream && localStream.getAudioTracks()[0]; if (!t) return;
+    t.enabled = !t.enabled;
+    e.target.textContent = t.enabled ? "Mute" : "Unmute";
+    e.target.classList.toggle("off", !t.enabled);
+  };
+  $("camBtn").onclick = e => {
+    const t = localStream && localStream.getVideoTracks()[0]; if (!t) return;
+    t.enabled = !t.enabled;
+    e.target.textContent = t.enabled ? "Camera off" : "Camera on";
+    e.target.classList.toggle("off", !t.enabled);
+  };
+  $("endBtn").onclick = () => endCall();
+
+  $("createBtn").onclick = startHost;
+  $("joinBtn").onclick = joinCall;
+</script>
+</body>
+</html>
